@@ -1,164 +1,211 @@
-from typing import TypedDict, List, Dict
-import requests
-from bs4 import BeautifulSoup
+"""
+Motor principal del agente Red-AI.
+Grafo de estados LangGraph que orquesta el proceso autónomo de pentesting.
+"""
+
+from typing import TypedDict, List, Annotated
+import operator
 from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
-from core.herramientas import herramienta_nmap
-import json
+
+from core.herramientas import TODAS_LAS_HERRAMIENTAS, MAPA_HERRAMIENTAS
+from core.prompts import SYSTEM_PROMPT, PROMPT_ANALISIS, PROMPT_REPORTE
+
 
 # ==========================================
-# 1. EL ESTADO (La "Memoria" de la IA)
+# 1. ESTADO GLOBAL DEL AGENTE
 # ==========================================
 class AgentState(TypedDict):
-    url_objetivo: str
-    endpoints_descubiertos: List[str]
-    parametros_encontrados: List[Dict[str, str]]
-    vulnerabilidades_confirmadas: List[str]
-    intentos_actuales: int
+    objetivo: str
+    autorizacion: str
+    hallazgos: Annotated[List[str], operator.add]
+    mensajes: Annotated[List, operator.add]
+    iteracion: int
+    max_iteraciones: int
+    auditoria_completa: bool
+    reporte_final: str
+
 
 # ==========================================
-# 1.5 CONEXIÓN AL LLM LOCAL CON HERRAMIENTAS
+# 2. CONEXIÓN AL LLM
 # ==========================================
-# Cambiamos a ChatOllama porque es la clase que soporta el emparejamiento de funciones (Tool Calling)
 llm = ChatOllama(model="qwen2.5-coder:7b", temperature=0.1)
+llm_con_herramientas = llm.bind_tools(TODAS_LAS_HERRAMIENTAS)
 
-# Vinculamos las herramientas de Kali al cerebro de la IA para que sepa que puede usarlas
-herramientas_disponibles = [herramienta_nmap]
-llm_con_herramientas = llm.bind_tools(herramientas_disponibles)
 
 # ==========================================
-# 2. NODO CRAWLER (Fase 1: Descubrimiento)
+# 3. NODOS DEL GRAFO
 # ==========================================
-def nodo_crawler(state: AgentState) -> AgentState:
-    print(f"\n[+] Fase 1: Iniciando Crawler en {state['url_objetivo']}")
-    url = state["url_objetivo"]
-    enlaces_encontrados = []
-    
-    try:
-        respuesta = requests.get(url, timeout=10)
-        respuesta.raise_for_status()
-        soup = BeautifulSoup(respuesta.text, 'html.parser')
-        
-        for etiqueta_a in soup.find_all('a'):
-            href = etiqueta_a.get('href')
-            if href and href not in enlaces_encontrados:
-                enlaces_encontrados.append(href)
-                
-        print(f"[*] Crawler finalizado: {len(enlaces_encontrados)} enlaces descubiertos.")
-    except Exception as e:
-        print(f"[-] Error en Crawler: {e}")
-        
-    # SIMULACIÓN PARA TESTEAR EL GRAFO: 
-    # Forzamos que el crawler devuelva estos enlaces para que la IA tenga trabajo
-    enlaces_simulados = ["/index.html", "/api/users?id=1", "/login.php"]
-    print(f"[*] (Simulación) Inyectando {len(enlaces_simulados)} enlaces al estado...")
-    
-    return {"endpoints_descubiertos": enlaces_simulados}
 
-# ==========================================
-# 3. NODO ANALIZADOR (Fase 2: Razonamiento y Tool Calling)
-# ==========================================
-def nodo_analizador(state: AgentState) -> AgentState:
-    print("\n[+] Fase 2: IA Analizando y decidiendo uso de herramientas...")
-    url = state["url_objetivo"]
-    endpoints = state.get("endpoints_descubiertos", [])
-    
-    if not endpoints:
-        print("[-] No hay endpoints para analizar.")
-        return {"parametros_encontrados": []}
+def nodo_reconocimiento(state: AgentState) -> dict:
+    """Fase 1: Reconocimiento inicial obligatorio con nmap y whatweb."""
+    print(f"\n{'='*50}")
+    print(f"[FASE 1] RECONOCIMIENTO -> {state['objetivo']}")
+    print(f"{'='*50}")
 
-    # Extraemos el dominio limpio para que las herramientas de red lo entiendan correctamente
-    dominio = url.replace("http://", "").replace("https://", "").split("/")[0]
-    
-    prompt = f"""
-    Eres un agente DAST autónomo. Se te ha asignado auditar el objetivo: {dominio}.
-    Has descubierto los siguientes endpoints: {endpoints}
-    
-    Como primer paso estratégico, utiliza la herramienta 'herramienta_nmap' para descubrir qué puertos están abiertos en el dominio objetivo.
-    """
-    
-    print("[*] Consultando al modelo en Ollama para orquestación...")
-    try:
-        # Invocamos al modelo que tiene la capacidad de usar herramientas
-        respuesta_ia = llm_con_herramientas.invoke(prompt)
-        
-        # Verificamos si la IA ha decidido invocar una herramienta emitiendo un JSON de ejecución
-        # 1. Intento nativo de LangChain (cuando el modelo usa la API interna correctamente)
-        if hasattr(respuesta_ia, 'tool_calls') and respuesta_ia.tool_calls:
-            for tool_call in respuesta_ia.tool_calls:
-                if tool_call["name"] == "herramienta_nmap":
-                    objetivo_decidido = tool_call["args"].get("objetivo", dominio)
-                    print(f"[*] La IA ha decidido ejecutar Nmap sobre: {objetivo_decidido}")
-                    
-                    resultado_terminal = herramienta_nmap.invoke({"objetivo": objetivo_decidido})
-                    print("\n--- RESULTADO DE LA TERMINAL (NMAP) ---")
-                    print(resultado_terminal)
-                    print("---------------------------------------\n")
-                    
-        # 2. Parseo de Contingencia (cuando el modelo devuelve el JSON como texto plano)
+    objetivo = state["objetivo"]
+    host = objetivo.replace("http://", "").replace("https://", "").split("/")[0]
+    hallazgos_reconocimiento = []
+
+    print("[*] Ejecutando Nmap...")
+    resultado_nmap = MAPA_HERRAMIENTAS["herramienta_nmap"].invoke({"objetivo": host})
+    hallazgos_reconocimiento.append(f"[NMAP - {host}]\n{resultado_nmap}")
+
+    print("[*] Ejecutando WhatWeb...")
+    resultado_whatweb = MAPA_HERRAMIENTAS["herramienta_whatweb"].invoke({"objetivo": objetivo})
+    hallazgos_reconocimiento.append(f"[WHATWEB - {objetivo}]\n{resultado_whatweb}")
+
+    print(f"[✓] Reconocimiento completado.")
+    return {"hallazgos": hallazgos_reconocimiento, "iteracion": 0}
+
+
+def nodo_agente_decisor(state: AgentState) -> dict:
+    """Fase 2: El LLM analiza hallazgos y decide la siguiente acción autónomamente."""
+    iteracion = state["iteracion"] + 1
+    print(f"\n{'='*50}")
+    print(f"[FASE 2] DECISIÓN AUTÓNOMA — Iteración {iteracion}/{state['max_iteraciones']}")
+    print(f"{'='*50}")
+
+    hallazgos_texto = "\n\n".join(state["hallazgos"]) if state["hallazgos"] else "Sin hallazgos aún."
+
+    prompt_usuario = PROMPT_ANALISIS.format(
+        objetivo=state["objetivo"],
+        iteracion=iteracion,
+        hallazgos=hallazgos_texto
+    )
+
+    mensajes = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=prompt_usuario)
+    ]
+
+    print("[*] Consultando al LLM...")
+    respuesta = llm_con_herramientas.invoke(mensajes)
+
+    nuevos_hallazgos = []
+    auditoria_completa = False
+
+    # Tool Calling nativo (LangChain)
+    if hasattr(respuesta, 'tool_calls') and respuesta.tool_calls:
+        for tool_call in respuesta.tool_calls:
+            nombre_tool = tool_call["name"]
+            args = tool_call["args"]
+            print(f"\n[IA DECIDE] Ejecutar: {nombre_tool} con args: {args}")
+            if nombre_tool in MAPA_HERRAMIENTAS:
+                resultado = MAPA_HERRAMIENTAS[nombre_tool].invoke(args)
+                nuevos_hallazgos.append(f"[{nombre_tool.upper()} - Iter.{iteracion}]\n{resultado}")
+                print(f"[✓] {nombre_tool} completado.")
+
+    # Respuesta en texto
+    else:
+        texto = respuesta.content if hasattr(respuesta, 'content') else str(respuesta)
+        print(f"\n[IA RAZONA]\n{texto}")
+        if "AUDITORIA_COMPLETA" in texto:
+            print("\n[✓] Auditoría marcada como completa por el agente.")
+            auditoria_completa = True
         else:
-            texto_ia = respuesta_ia.content.strip()
-            ejecutado = False
-            
-            try:
-                # Si el texto parece un JSON, intentamos interpretarlo
-                if texto_ia.startswith("{") and texto_ia.endswith("}"):
-                    datos = json.loads(texto_ia)
-                    if datos.get("name") == "herramienta_nmap":
-                        objetivo_decidido = datos.get("arguments", {}).get("objetivo", dominio)
-                        print(f"[*] (Contingencia) La IA ha decidido ejecutar Nmap sobre: {objetivo_decidido}")
-                        
-                        resultado_terminal = herramienta_nmap.invoke({"objetivo": objetivo_decidido})
-                        print("\n--- RESULTADO DE LA TERMINAL (NMAP) ---")
-                        print(resultado_terminal)
-                        print("---------------------------------------\n")
-                        ejecutado = True
-            except json.JSONDecodeError:
-                pass # No es un JSON válido, seguimos adelante
-                
-            # Si no se ejecutó por ninguna de las dos vías, mostramos el razonamiento
-            if not ejecutado:
-                print("[*] La IA analizó el contexto pero no creyó necesario usar herramientas en este paso.")
-                print(f"Razonamiento: {texto_ia}")
-            
-    except Exception as e:
-        print(f"[-] Error de conexión con Ollama o ejecución de herramienta: {e}")
+            nuevos_hallazgos.append(f"[RAZONAMIENTO IA - Iter.{iteracion}]\n{texto}")
 
-    # Mantenemos los parámetros simulados por ahora para que el grafo de estado no se rompa
-    parametros_simulados = [{"endpoint": "/login", "param": "username"}]
-    
-    return {"parametros_encontrados": parametros_simulados, "intentos_actuales": 0}
+    return {
+        "hallazgos": nuevos_hallazgos,
+        "iteracion": iteracion,
+        "auditoria_completa": auditoria_completa,
+        "mensajes": [respuesta],
+    }
 
-# ==========================================
-# 4. ORQUESTACIÓN (El Flujo Autónomo)
-# ==========================================
-workflow = StateGraph(AgentState)
 
-workflow.add_node("crawler", nodo_crawler)
-workflow.add_node("analizador", nodo_analizador)
+def nodo_generador_reporte(state: AgentState) -> dict:
+    """Fase final: Genera el reporte técnico en markdown."""
+    print(f"\n{'='*50}")
+    print("[FASE FINAL] GENERANDO REPORTE")
+    print(f"{'='*50}")
 
-workflow.set_entry_point("crawler")
-workflow.add_edge("crawler", "analizador")
-workflow.add_edge("analizador", END) 
+    hallazgos_texto = "\n\n".join(state["hallazgos"])
+    prompt_reporte = PROMPT_REPORTE.format(
+        objetivo=state["objetivo"],
+        hallazgos=hallazgos_texto
+    )
 
-agente_app = workflow.compile()
+    respuesta = llm.invoke([
+        SystemMessage(content="Eres un experto en ciberseguridad redactando reportes técnicos profesionales."),
+        HumanMessage(content=prompt_reporte)
+    ])
+
+    reporte = respuesta.content if hasattr(respuesta, 'content') else str(respuesta)
+    print("[✓] Reporte generado.")
+    return {"reporte_final": reporte}
+
 
 # ==========================================
-# EJECUCIÓN DEL AGENTE COMPLETO
+# 4. ROUTING CONDICIONAL
+# ==========================================
+
+def decidir_siguiente_paso(state: AgentState) -> str:
+    if state.get("auditoria_completa", False):
+        return "generar_reporte"
+    if state["iteracion"] >= state["max_iteraciones"]:
+        print(f"\n[!] Límite de iteraciones alcanzado. Generando reporte.")
+        return "generar_reporte"
+    return "agente_decisor"
+
+
+# ==========================================
+# 5. CONSTRUCCIÓN DEL GRAFO
+# ==========================================
+
+def construir_grafo():
+    workflow = StateGraph(AgentState)
+    workflow.add_node("reconocimiento", nodo_reconocimiento)
+    workflow.add_node("agente_decisor", nodo_agente_decisor)
+    workflow.add_node("generar_reporte", nodo_generador_reporte)
+
+    workflow.set_entry_point("reconocimiento")
+    workflow.add_edge("reconocimiento", "agente_decisor")
+    workflow.add_conditional_edges(
+        "agente_decisor",
+        decidir_siguiente_paso,
+        {
+            "agente_decisor": "agente_decisor",
+            "generar_reporte": "generar_reporte"
+        }
+    )
+    workflow.add_edge("generar_reporte", END)
+    return workflow.compile()
+
+
+agente_app = construir_grafo()
+
+
+# ==========================================
+# EJECUCIÓN DIRECTA
 # ==========================================
 if __name__ == "__main__":
     estado_inicial: AgentState = {
-        "url_objetivo": "http://example.com",
-        "endpoints_descubiertos": [],
-        "parametros_encontrados": [],
-        "vulnerabilidades_confirmadas": [],
-        "intentos_actuales": 0
+        "objetivo": "http://localhost:3000",
+        "autorizacion": "TFG-UTAD-2026",
+        "hallazgos": [],
+        "mensajes": [],
+        "iteracion": 0,
+        "max_iteraciones": 5,
+        "auditoria_completa": False,
+        "reporte_final": "",
     }
-    
-    print("=== INICIANDO AGENTE DAST AUTÓNOMO CON TOOL CALLING ===")
-    
+
+    print("=" * 60)
+    print("   RED-AI — Agente Autónomo de Pentesting Web")
+    print(f"   Objetivo: {estado_inicial['objetivo']}")
+    print("=" * 60)
+
+    estado_final = None
     for output in agente_app.stream(estado_inicial):
-        for key, value in output.items():
-            print(f"\n[Sistema] Nodo completado: {key}")
-            
-    print("\n=== FLUJO AUTÓNOMO FINALIZADO ===")
+        for nodo, estado in output.items():
+            print(f"\n[Sistema] ✓ Nodo: {nodo.upper()}")
+        estado_final = output
+
+    if estado_final:
+        ultimo = list(estado_final.values())[-1]
+        reporte = ultimo.get("reporte_final", "")
+        if reporte:
+            print("\n" + "=" * 60)
+            print(reporte)
