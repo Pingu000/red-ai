@@ -1,0 +1,8 @@
+langgraph
+langchain
+langchain-community
+fastapi
+uvicorn
+streamlit
+requests
+beautifulsoup4
