@@ -32,7 +32,7 @@ class AgentState(TypedDict):
 # ==========================================
 # 2. CONEXIÓN AL LLM
 # ==========================================
-llm = ChatOllama(model="qwen2.5-coder:7b", temperature=0.1)
+llm = ChatOllama(model="qwen2.5-coder:7b", temperature=0.1, base_url="http://192.168.56.1:11434")
 llm_con_herramientas = llm.bind_tools(TODAS_LAS_HERRAMIENTAS)
 
 
