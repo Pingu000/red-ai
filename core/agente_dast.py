@@ -1,8 +1,10 @@
 from typing import TypedDict, List, Dict
 import requests
 from bs4 import BeautifulSoup
-from langchain_ollama import OllamaLLM
-from langgraph.graph import StateGraph, END 
+from langchain_ollama import ChatOllama
+from langgraph.graph import StateGraph, END
+from core.herramientas import herramienta_nmap
+import json
 
 # ==========================================
 # 1. EL ESTADO (La "Memoria" de la IA)
@@ -15,11 +17,14 @@ class AgentState(TypedDict):
     intentos_actuales: int
 
 # ==========================================
-# 1.5 CONEXIÓN AL LLM LOCAL (El "Cerebro")
+# 1.5 CONEXIÓN AL LLM LOCAL CON HERRAMIENTAS
 # ==========================================
-# Asegúrate de que el nombre del modelo coincida exactamente con el que tienes en Ollama
-llm = OllamaLLM(model="qwen2.5-coder:7b", temperature=0.1)
-# Temperature 0.1 hace que la IA sea analítica y determinista, no creativa.
+# Cambiamos a ChatOllama porque es la clase que soporta el emparejamiento de funciones (Tool Calling)
+llm = ChatOllama(model="qwen2.5-coder:7b", temperature=0.1)
+
+# Vinculamos las herramientas de Kali al cerebro de la IA para que sepa que puede usarlas
+herramientas_disponibles = [herramienta_nmap]
+llm_con_herramientas = llm.bind_tools(herramientas_disponibles)
 
 # ==========================================
 # 2. NODO CRAWLER (Fase 1: Descubrimiento)
@@ -51,84 +56,108 @@ def nodo_crawler(state: AgentState) -> AgentState:
     return {"endpoints_descubiertos": enlaces_simulados}
 
 # ==========================================
-# 3. NODO ANALIZADOR (Fase 2: Razonamiento IA)
+# 3. NODO ANALIZADOR (Fase 2: Razonamiento y Tool Calling)
 # ==========================================
 def nodo_analizador(state: AgentState) -> AgentState:
-    print("\n[+] Fase 2: IA Analizando Superficie de Ataque...")
+    print("\n[+] Fase 2: IA Analizando y decidiendo uso de herramientas...")
+    url = state["url_objetivo"]
     endpoints = state.get("endpoints_descubiertos", [])
     
     if not endpoints:
         print("[-] No hay endpoints para analizar.")
         return {"parametros_encontrados": []}
 
-    # Aquí construimos el Prompt que le pasamos al LLM
-    prompt = f"""
-    Actúa como el motor de análisis de una herramienta DAST.
-    Tu objetivo es analizar la siguiente lista de rutas (endpoints) extraídas de una aplicación web:
-    {endpoints}
+    # Extraemos el dominio limpio para que las herramientas de red lo entiendan correctamente
+    dominio = url.replace("http://", "").replace("https://", "").split("/")[0]
     
-    Identifica cuáles de estos endpoints son susceptibles de recibir entrada del usuario (por ejemplo, rutas de login, búsqueda, perfiles, o aquellas con parámetros como '?id=').
-    Devuelve estrictamente un análisis técnico breve de los vectores de entrada más críticos.
+    prompt = f"""
+    Eres un agente DAST autónomo. Se te ha asignado auditar el objetivo: {dominio}.
+    Has descubierto los siguientes endpoints: {endpoints}
+    
+    Como primer paso estratégico, utiliza la herramienta 'herramienta_nmap' para descubrir qué puertos están abiertos en el dominio objetivo.
     """
     
-    print("[*] Consultando al modelo en Ollama...")
+    print("[*] Consultando al modelo en Ollama para orquestación...")
     try:
-        respuesta_ia = llm.invoke(prompt)
-        print("\n--- RAZONAMIENTO DE LA IA ---")
-        print(respuesta_ia)
-        print("-----------------------------\n")
+        # Invocamos al modelo que tiene la capacidad de usar herramientas
+        respuesta_ia = llm_con_herramientas.invoke(prompt)
+        
+        # Verificamos si la IA ha decidido invocar una herramienta emitiendo un JSON de ejecución
+        # 1. Intento nativo de LangChain (cuando el modelo usa la API interna correctamente)
+        if hasattr(respuesta_ia, 'tool_calls') and respuesta_ia.tool_calls:
+            for tool_call in respuesta_ia.tool_calls:
+                if tool_call["name"] == "herramienta_nmap":
+                    objetivo_decidido = tool_call["args"].get("objetivo", dominio)
+                    print(f"[*] La IA ha decidido ejecutar Nmap sobre: {objetivo_decidido}")
+                    
+                    resultado_terminal = herramienta_nmap.invoke({"objetivo": objetivo_decidido})
+                    print("\n--- RESULTADO DE LA TERMINAL (NMAP) ---")
+                    print(resultado_terminal)
+                    print("---------------------------------------\n")
+                    
+        # 2. Parseo de Contingencia (cuando el modelo devuelve el JSON como texto plano)
+        else:
+            texto_ia = respuesta_ia.content.strip()
+            ejecutado = False
+            
+            try:
+                # Si el texto parece un JSON, intentamos interpretarlo
+                if texto_ia.startswith("{") and texto_ia.endswith("}"):
+                    datos = json.loads(texto_ia)
+                    if datos.get("name") == "herramienta_nmap":
+                        objetivo_decidido = datos.get("arguments", {}).get("objetivo", dominio)
+                        print(f"[*] (Contingencia) La IA ha decidido ejecutar Nmap sobre: {objetivo_decidido}")
+                        
+                        resultado_terminal = herramienta_nmap.invoke({"objetivo": objetivo_decidido})
+                        print("\n--- RESULTADO DE LA TERMINAL (NMAP) ---")
+                        print(resultado_terminal)
+                        print("---------------------------------------\n")
+                        ejecutado = True
+            except json.JSONDecodeError:
+                pass # No es un JSON válido, seguimos adelante
+                
+            # Si no se ejecutó por ninguna de las dos vías, mostramos el razonamiento
+            if not ejecutado:
+                print("[*] La IA analizó el contexto pero no creyó necesario usar herramientas en este paso.")
+                print(f"Razonamiento: {texto_ia}")
+            
     except Exception as e:
-        print(f"[-] Error de conexión con Ollama: {e}")
-        print("    (¿Está el servidor de Ollama corriendo?)")
+        print(f"[-] Error de conexión con Ollama o ejecución de herramienta: {e}")
 
-    # Por ahora simulamos la extracción estructurada hasta que apliquemos parseo JSON
+    # Mantenemos los parámetros simulados por ahora para que el grafo de estado no se rompa
     parametros_simulados = [{"endpoint": "/login", "param": "username"}]
     
     return {"parametros_encontrados": parametros_simulados, "intentos_actuales": 0}
 
-# (Mantén todos los imports, el AgentState, la conexión a OllamaLLM y las funciones nodo_crawler y nodo_analizador que ya tienes)
-
-from langgraph.graph import StateGraph, END # AÑADE ESTE IMPORT ARRIBA DEL TODO
-
-# ... (Aquí va tu código anterior de los nodos) ...
-
 # ==========================================
 # 4. ORQUESTACIÓN (El Flujo Autónomo)
 # ==========================================
-# Creamos el grafo pasándole nuestra estructura de memoria
 workflow = StateGraph(AgentState)
 
-# Añadimos los "órganos" de nuestro agente al grafo
 workflow.add_node("crawler", nodo_crawler)
 workflow.add_node("analizador", nodo_analizador)
 
-# Definimos cómo fluye la información de forma autónoma
 workflow.set_entry_point("crawler")
 workflow.add_edge("crawler", "analizador")
-workflow.add_edge("analizador", END) # Por ahora termina aquí, luego añadiremos el validador/explotador
+workflow.add_edge("analizador", END) 
 
-# Compilamos el agente en una aplicación ejecutable
 agente_app = workflow.compile()
 
 # ==========================================
 # EJECUCIÓN DEL AGENTE COMPLETO
 # ==========================================
 if __name__ == "__main__":
-    # Estado inicial real
     estado_inicial: AgentState = {
-        "url_objetivo": "http://example.com", # Usamos example.com para esta prueba de flujo
+        "url_objetivo": "http://example.com",
         "endpoints_descubiertos": [],
         "parametros_encontrados": [],
         "vulnerabilidades_confirmadas": [],
         "intentos_actuales": 0
     }
     
-    print("=== INICIANDO AGENTE DAST AUTÓNOMO ===")
+    print("=== INICIANDO AGENTE DAST AUTÓNOMO CON TOOL CALLING ===")
     
-    # app.stream ejecuta los nodos en orden automáticamente, pasándose el estado de uno a otro
     for output in agente_app.stream(estado_inicial):
-        # LangGraph devuelve el estado modificado después de cada nodo
-        # Podemos imprimir en qué nodo estamos para depurar
         for key, value in output.items():
             print(f"\n[Sistema] Nodo completado: {key}")
             
