@@ -1,8 +1,8 @@
 langgraph
 langchain
 langchain-community
-fastapi
-uvicorn
+langchain-ollama
+langchain-core
 streamlit
 requests
 beautifulsoup4
