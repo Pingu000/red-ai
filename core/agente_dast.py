@@ -1,282 +1,345 @@
 """
-Motor principal del agente Red-AI.
-Grafo de estados LangGraph que orquesta el proceso autónomo de pentesting.
+Agente DAST principal — Red-AI
+LangGraph + Ollama (en host Windows vía Host-Only adapter)
 """
-
-from typing import TypedDict, List, Annotated, Set
 import operator
 import json
 import re
+import sys
+from typing import TypedDict, Annotated, List
+
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
 from langgraph.graph import StateGraph, END
 
 from core.herramientas import TODAS_LAS_HERRAMIENTAS, MAPA_HERRAMIENTAS
 from core.prompts import SYSTEM_PROMPT, PROMPT_ANALISIS, PROMPT_REPORTE
 
+# ─── Configuración ────────────────────────────────────────────────────────────
+OLLAMA_URL = "http://192.168.56.1:11434"
+MODELO_DEFAULT = "qwen2.5-coder:14b"
 
-# ==========================================
-# 1. ESTADO GLOBAL DEL AGENTE
-# ==========================================
+# ─── Estado del grafo ─────────────────────────────────────────────────────────
 class AgentState(TypedDict):
     objetivo: str
-    autorizacion: str
+    modelo: str
     hallazgos: Annotated[List[str], operator.add]
-    mensajes: Annotated[List, operator.add]
+    herramientas_usadas: Annotated[List[str], operator.add]
     iteracion: int
-    max_iteraciones: int
-    auditoria_completa: bool
-    reporte_final: str
-    herramientas_usadas: List[str]   # rastrea qué tools ya se ejecutaron
+    reporte: str
+    messages: Annotated[List, operator.add]
+    pensamiento: str   # último razonamiento del modelo en texto libre
 
 
-# ==========================================
-# 2. CONEXIÓN AL LLM
-# ==========================================
-OLLAMA_URL = "http://192.168.56.1:11434"
-MODELO     = "qwen2.5-coder:14b"
+# ─── Parser de emergencia ─────────────────────────────────────────────────────
 
-llm = ChatOllama(model=MODELO, temperature=0.1, base_url=OLLAMA_URL)
-llm_con_herramientas = llm.bind_tools(TODAS_LAS_HERRAMIENTAS)
-
-
-# ==========================================
-# 3. PARSER DE CONTINGENCIA ROBUSTO
-# ==========================================
-def _extraer_json_balanceado(texto: str) -> list:
-    """Extrae todos los objetos JSON válidos de un texto, respetando anidamiento."""
-    candidatos = []
-    i = 0
-    while i < len(texto):
-        if texto[i] == '{':
-            depth = 0
-            j = i
-            while j < len(texto):
-                if texto[j] == '{':
-                    depth += 1
-                elif texto[j] == '}':
-                    depth -= 1
-                    if depth == 0:
-                        candidato = texto[i:j+1]
-                        try:
-                            datos = json.loads(candidato)
-                            candidatos.append(datos)
-                        except json.JSONDecodeError:
-                            pass
-                        break
-                j += 1
-        i += 1
-    return candidatos
+def _extraer_json_balanceado(texto: str) -> dict | None:
+    """Extrae el primer objeto JSON completo (con llaves balanceadas)."""
+    depth = 0
+    start = None
+    for i, ch in enumerate(texto):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                fragment = texto[start:i+1]
+                try:
+                    return json.loads(fragment)
+                except json.JSONDecodeError:
+                    start = None
+    return None
 
 
-def _intentar_ejecutar_desde_texto(texto: str, iteracion: int) -> list:
+def _intentar_ejecutar_desde_texto(content: str) -> list | None:
     """
-    Busca un JSON de tool call en el texto del LLM y ejecuta la herramienta.
-    Soporta: arguments / args / parameters  y  name / tool / function.
+    Intenta parsear un tool-call embebido como JSON en el texto del LLM.
+    Retorna [nombre_herramienta, resultado_str] o None.
     """
-    texto_limpio = re.sub(r'```(?:json)?\s*', '', texto).strip()
-    candidatos = _extraer_json_balanceado(texto_limpio)
+    datos = _extraer_json_balanceado(content)
+    if not datos:
+        return None
 
-    for datos in candidatos:
-        nombre = datos.get("name") or datos.get("tool") or datos.get("function")
-        args = (
-            datos.get("arguments")
-            or datos.get("args")
-            or datos.get("parameters")
-            or {}
-        )
-        if nombre and nombre in MAPA_HERRAMIENTAS:
-            print(f"\n[IA→TOOL CONTINGENCIA] {nombre} | args: {args}")
-            try:
-                resultado = MAPA_HERRAMIENTAS[nombre].invoke(args)
-                print(f"[✓] {nombre} ejecutado vía contingencia.")
-                return [nombre, f"[{nombre.upper()} - Iter.{iteracion}]\n{resultado}"]
-            except Exception as e:
-                print(f"[!] Error ejecutando {nombre}: {e}")
-                return [nombre, f"[ERROR {nombre.upper()} - Iter.{iteracion}]\n{e}"]
-    return []
+    nombre = datos.get("name") or datos.get("tool") or datos.get("function")
+    argumentos = (
+        datos.get("arguments")
+        or datos.get("args")
+        or datos.get("parameters")
+        or {}
+    )
+    if not nombre or nombre not in MAPA_HERRAMIENTAS:
+        return None
+
+    herramienta = MAPA_HERRAMIENTAS[nombre]
+    print(f"\n[PARSER] Tool call detectado en texto: {nombre}({argumentos})")
+    try:
+        resultado = herramienta.invoke(argumentos)
+        return [nombre, str(resultado)]
+    except Exception as e:
+        return [nombre, f"Error ejecutando {nombre}: {e}"]
 
 
-# ==========================================
-# 4. NODOS DEL GRAFO
-# ==========================================
+# ─── Extractor de pensamiento ─────────────────────────────────────────────────
+
+def _extraer_pensamiento(content: str) -> str:
+    """
+    Extrae el texto de razonamiento antes del JSON / tool call.
+    Todo lo que no es el bloque JSON se considera pensamiento.
+    """
+    # Quita bloques de código markdown
+    sin_code = re.sub(r'```[^`]*```', '', content, flags=re.DOTALL)
+    # Quita el primer bloque JSON
+    depth = 0
+    start_json = None
+    for i, ch in enumerate(sin_code):
+        if ch == '{':
+            if depth == 0:
+                start_json = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start_json is not None:
+                sin_code = sin_code[:start_json] + sin_code[i+1:]
+                break
+    pensamiento = sin_code.strip()
+    return pensamiento if len(pensamiento) > 5 else ""
+
+
+# ─── Nodos del grafo ──────────────────────────────────────────────────────────
 
 def nodo_reconocimiento(state: AgentState) -> dict:
-    """Fase 1: Reconocimiento inicial obligatorio con nmap y whatweb."""
-    print(f"\n{'='*50}")
-    print(f"[FASE 1] RECONOCIMIENTO -> {state['objetivo']}")
-    print(f"{'='*50}")
-
     objetivo = state["objetivo"]
-    host = objetivo.replace("http://", "").replace("https://", "").split("/")[0]
-    hallazgos_reconocimiento = []
+    modelo = state.get("modelo", MODELO_DEFAULT)
+    print(f"\n{'='*60}")
+    print(f"[RECONOCIMIENTO] Iniciando con modelo: {modelo}")
+    print(f"[RECONOCIMIENTO] Objetivo: {objetivo}")
+    print('='*60)
 
-    print("[*] Ejecutando Nmap...")
-    resultado_nmap = MAPA_HERRAMIENTAS["herramienta_nmap"].invoke({"objetivo": host})
-    hallazgos_reconocimiento.append(f"[NMAP - {host}]\n{resultado_nmap}")
+    llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=0)
+    hallazgos = []
+    herramientas_usadas = []
 
-    print("[*] Ejecutando WhatWeb...")
-    resultado_whatweb = MAPA_HERRAMIENTAS["herramienta_whatweb"].invoke({"objetivo": objetivo})
-    hallazgos_reconocimiento.append(f"[WHATWEB - {objetivo}]\n{resultado_whatweb}")
+    # Nmap
+    print("\n[+] Ejecutando nmap...")
+    try:
+        nmap_tool = MAPA_HERRAMIENTAS["herramienta_nmap"]
+        resultado_nmap = nmap_tool.invoke({"objetivo": objetivo})
+        hallazgos.append(f"[NMAP]\n{resultado_nmap}")
+        herramientas_usadas.append("herramienta_nmap")
+        print(f"[NMAP] Completado ({len(str(resultado_nmap))} chars)")
+    except Exception as e:
+        hallazgos.append(f"[NMAP] Error: {e}")
 
-    print(f"[✓] Reconocimiento completado.")
+    # WhatWeb
+    print("\n[+] Ejecutando whatweb...")
+    try:
+        whatweb_tool = MAPA_HERRAMIENTAS["herramienta_whatweb"]
+        resultado_whatweb = whatweb_tool.invoke({"objetivo": objetivo})
+        hallazgos.append(f"[WHATWEB]\n{resultado_whatweb}")
+        herramientas_usadas.append("herramienta_whatweb")
+        print(f"[WHATWEB] Completado ({len(str(resultado_whatweb))} chars)")
+    except Exception as e:
+        hallazgos.append(f"[WHATWEB] Error: {e}")
+
     return {
-        "hallazgos": hallazgos_reconocimiento,
+        "hallazgos": hallazgos,
+        "herramientas_usadas": herramientas_usadas,
         "iteracion": 0,
-        "herramientas_usadas": ["herramienta_nmap", "herramienta_whatweb"],
+        "messages": [],
+        "pensamiento": "",
     }
 
 
 def nodo_agente_decisor(state: AgentState) -> dict:
-    """Fase 2: El LLM analiza hallazgos y decide la siguiente acción autónomamente."""
-    iteracion = state["iteracion"] + 1
+    objetivo = state["objetivo"]
+    modelo = state.get("modelo", MODELO_DEFAULT)
+    hallazgos = state.get("hallazgos", [])
     herramientas_usadas = state.get("herramientas_usadas", [])
+    iteracion = state.get("iteracion", 0) + 1
 
-    print(f"\n{'='*50}")
-    print(f"[FASE 2] DECISIÓN AUTÓNOMA — Iteración {iteracion}/{state['max_iteraciones']}")
-    print(f"[*] Herramientas ya usadas: {herramientas_usadas}")
-    print(f"{'='*50}")
+    print(f"\n{'─'*60}")
+    print(f"[AGENTE] Iteración #{iteracion} | Modelo: {modelo}")
+    print(f"[AGENTE] Herramientas usadas hasta ahora: {herramientas_usadas}")
 
-    # Solo los últimos 3 hallazgos para no saturar el contexto
-    hallazgos_recientes = state["hallazgos"][-3:] if len(state["hallazgos"]) > 3 else state["hallazgos"]
-    hallazgos_texto = "\n\n".join(hallazgos_recientes) if hallazgos_recientes else "Sin hallazgos aún."
+    llm = ChatOllama(
+        base_url=OLLAMA_URL,
+        model=modelo,
+        temperature=0.1,
+    ).bind_tools(TODAS_LAS_HERRAMIENTAS)
 
-    if len(hallazgos_texto) > 4000:
-        hallazgos_texto = hallazgos_texto[:4000] + "\n...[truncado]"
+    # Construir prompt
+    hallazgos_recientes = hallazgos[-8:]  # últimos 8 hallazgos
+    hallazgos_str = "\n\n".join(hallazgos_recientes)
 
     prompt_usuario = PROMPT_ANALISIS.format(
-        objetivo=state["objetivo"],
+        objetivo=objetivo,
         iteracion=iteracion,
         herramientas_usadas=", ".join(herramientas_usadas) if herramientas_usadas else "ninguna",
-        hallazgos=hallazgos_texto
+        hallazgos=hallazgos_str[:4000],
     )
 
     mensajes = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=prompt_usuario)
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt_usuario},
     ]
 
-    print("[*] Consultando al LLM...")
-    respuesta = llm_con_herramientas.invoke(mensajes)
+    print(f"\n[AGENTE] Enviando prompt al LLM...")
+    respuesta = llm.invoke(mensajes)
+    content = respuesta.content if isinstance(respuesta.content, str) else ""
 
+    # ── Extraer y mostrar pensamiento ───────────────────────────────────────
+    pensamiento = _extraer_pensamiento(content)
+    if pensamiento:
+        print(f"\n\033[93m[💭 RAZONAMIENTO]\033[0m")
+        print(f"\033[93m{pensamiento}\033[0m")
+
+    # ── Procesar tool calls nativos ─────────────────────────────────────────
     nuevos_hallazgos = []
     nuevas_herramientas = []
-    auditoria_completa = False
 
-    # VÍA 1: Tool Calling nativo
-    if hasattr(respuesta, 'tool_calls') and respuesta.tool_calls:
-        for tool_call in respuesta.tool_calls:
-            nombre_tool = tool_call["name"]
-            args = tool_call["args"]
-            print(f"\n[IA→TOOL NATIVO] {nombre_tool} | args: {args}")
-            if nombre_tool in MAPA_HERRAMIENTAS:
-                resultado = MAPA_HERRAMIENTAS[nombre_tool].invoke(args)
-                nuevos_hallazgos.append(f"[{nombre_tool.upper()} - Iter.{iteracion}]\n{resultado}")
-                nuevas_herramientas.append(nombre_tool)
-                print(f"[✓] {nombre_tool} ejecutado vía tool calling nativo.")
+    if hasattr(respuesta, "tool_calls") and respuesta.tool_calls:
+        for tc in respuesta.tool_calls:
+            nombre = tc["name"]
+            args = tc["args"]
+            print(f"\n\033[94m[🔧 TOOL CALL]\033[0m {nombre}({args})")
 
-    # VÍA 2: Texto plano — puede contener JSON de tool call
-    else:
-        texto = respuesta.content if hasattr(respuesta, 'content') else str(respuesta)
-        print(f"\n[IA RESPONDE]\n{texto[:300]}")
+            if nombre in MAPA_HERRAMIENTAS:
+                try:
+                    resultado = MAPA_HERRAMIENTAS[nombre].invoke(args)
+                    resultado_str = str(resultado)
+                    print(f"\033[92m[✓ RESULTADO]\033[0m {resultado_str[:300]}...")
+                    nuevos_hallazgos.append(f"[{nombre.upper()}]\n{resultado_str}")
+                    nuevas_herramientas.append(nombre)
+                except Exception as e:
+                    err = f"Error en {nombre}: {e}"
+                    print(f"\033[91m[✗ ERROR]\033[0m {err}")
+                    nuevos_hallazgos.append(f"[{nombre.upper()}] {err}")
+            else:
+                print(f"\033[91m[✗]\033[0m Herramienta desconocida: {nombre}")
 
-        resultado_contingencia = _intentar_ejecutar_desde_texto(texto, iteracion)
-
-        if resultado_contingencia:
-            nombre_tool = resultado_contingencia[0]
-            hallazgo = resultado_contingencia[1]
-            nuevos_hallazgos.append(hallazgo)
+    elif content:
+        # Intentar parser de emergencia
+        resultado_parser = _intentar_ejecutar_desde_texto(content)
+        if resultado_parser:
+            nombre_tool, resultado_str = resultado_parser
+            print(f"\033[92m[✓ PARSER]\033[0m {nombre_tool}: {resultado_str[:300]}...")
+            nuevos_hallazgos.append(f"[{nombre_tool.upper()}]\n{resultado_str}")
             nuevas_herramientas.append(nombre_tool)
-        elif "AUDITORIA_COMPLETA" in texto:
-            print("\n[✓] Auditoría marcada como completa por el agente.")
-            auditoria_completa = True
+        elif "AUDITORIA_COMPLETA" in content:
+            print("\n\033[92m[✓] AUDITORIA_COMPLETA detectado\033[0m")
+            nuevos_hallazgos.append("[DECISIÓN] AUDITORIA_COMPLETA")
         else:
-            print("[*] Razonamiento sin tool call. Continuando.")
-            nuevos_hallazgos.append(f"[RAZONAMIENTO IA - Iter.{iteracion}]\n{texto[:500]}")
+            print(f"\n\033[90m[AGENTE] Respuesta de texto (sin tool call):\033[0m\n{content[:500]}")
 
     return {
         "hallazgos": nuevos_hallazgos,
+        "herramientas_usadas": nuevas_herramientas,
         "iteracion": iteracion,
-        "auditoria_completa": auditoria_completa,
-        "mensajes": [respuesta],
-        "herramientas_usadas": herramientas_usadas + nuevas_herramientas,
+        "messages": [respuesta],
+        "pensamiento": pensamiento,
     }
 
 
 def nodo_generador_reporte(state: AgentState) -> dict:
-    """Fase final: Genera el reporte técnico en markdown."""
-    print(f"\n{'='*50}")
-    print("[FASE FINAL] GENERANDO REPORTE")
-    print(f"{'='*50}")
+    objetivo = state["objetivo"]
+    modelo = state.get("modelo", MODELO_DEFAULT)
+    hallazgos = state.get("hallazgos", [])
 
-    resumen_hallazgos = []
-    for h in state["hallazgos"]:
-        resumen_hallazgos.append(h[:600] + ("..." if len(h) > 600 else ""))
+    print(f"\n{'='*60}")
+    print(f"[REPORTE] Generando reporte final con modelo {modelo}...")
 
-    hallazgos_texto = "\n\n---\n\n".join(resumen_hallazgos)
-    if len(hallazgos_texto) > 5000:
-        hallazgos_texto = hallazgos_texto[:5000] + "\n\n...[truncado]"
+    # Truncar hallazgos para no saturar el contexto
+    MAX_CHARS_HALLAZGO = 600
+    MAX_TOTAL = 5000
+    hallazgos_truncados = []
+    total = 0
+    for h in hallazgos:
+        h_corto = h[:MAX_CHARS_HALLAZGO]
+        if total + len(h_corto) > MAX_TOTAL:
+            break
+        hallazgos_truncados.append(h_corto)
+        total += len(h_corto)
 
-    prompt_reporte = PROMPT_REPORTE.format(
-        objetivo=state["objetivo"],
-        hallazgos=hallazgos_texto
-    )
+    hallazgos_str = "\n\n---\n\n".join(hallazgos_truncados)
+
+    llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=0)
+    prompt = PROMPT_REPORTE.format(objetivo=objetivo, hallazgos=hallazgos_str)
 
     try:
-        respuesta = llm.invoke([
-            SystemMessage(content="Eres un experto en ciberseguridad. Genera un reporte técnico conciso en markdown. Máximo 500 palabras."),
-            HumanMessage(content=prompt_reporte)
-        ])
-        reporte = respuesta.content if hasattr(respuesta, 'content') else str(respuesta)
+        respuesta = llm.invoke([{"role": "user", "content": prompt}])
+        reporte = respuesta.content
     except Exception as e:
-        print(f"[!] Error al generar reporte con LLM: {e}")
-        print("[*] Generando reporte de emergencia...")
-        reporte = f"# Reporte Red-AI — {state['objetivo']}\n\n"
-        reporte += f"**Auditoría completada en {state['iteracion']} iteraciones.**\n\n"
+        print(f"[REPORTE] Error generando reporte: {e}")
+        # Fallback: reporte manual
+        reporte = f"# Reporte de Auditoría — {objetivo}\n\n"
         reporte += "## Hallazgos\n\n"
-        for h in state["hallazgos"]:
-            titulo = h.split("\n")[0]
-            reporte += f"### {titulo}\n```\n{h[:500]}\n```\n\n"
+        for h in hallazgos[:10]:
+            reporte += f"- {h[:200]}\n"
 
-    print("[✓] Reporte generado.")
-    return {"reporte_final": reporte}
+    print(f"[REPORTE] Completado ({len(reporte)} chars)")
+    return {"reporte": reporte}
 
 
-# ==========================================
-# 5. ROUTING CONDICIONAL
-# ==========================================
+# ─── Router ───────────────────────────────────────────────────────────────────
 
 def decidir_siguiente_paso(state: AgentState) -> str:
-    if state.get("auditoria_completa", False):
+    hallazgos = state.get("hallazgos", [])
+    iteracion = state.get("iteracion", 0)
+
+    # Comprobar señal de fin
+    for h in hallazgos[-3:]:
+        if "AUDITORIA_COMPLETA" in h:
+            print(f"\n[ROUTER] AUDITORIA_COMPLETA → generando reporte")
+            return "generar_reporte"
+
+    # Sin límite de iteraciones — continúa hasta AUDITORIA_COMPLETA
+    # (soft-cap de seguridad en 50 para evitar bucles infinitos reales)
+    if iteracion >= 50:
+        print(f"\n[ROUTER] Soft-cap de seguridad (50 iter) → generando reporte")
         return "generar_reporte"
-    if state["iteracion"] >= state["max_iteraciones"]:
-        print(f"\n[!] Límite de {state['max_iteraciones']} iteraciones alcanzado.")
-        return "generar_reporte"
+
+    print(f"\n[ROUTER] Iteración {iteracion} → continuar")
     return "agente_decisor"
 
 
-# ==========================================
-# 6. CONSTRUCCIÓN DEL GRAFO
-# ==========================================
+# ─── Construcción del grafo ───────────────────────────────────────────────────
 
 def construir_grafo():
-    workflow = StateGraph(AgentState)
-    workflow.add_node("reconocimiento", nodo_reconocimiento)
-    workflow.add_node("agente_decisor", nodo_agente_decisor)
-    workflow.add_node("generar_reporte", nodo_generador_reporte)
+    builder = StateGraph(AgentState)
 
-    workflow.set_entry_point("reconocimiento")
-    workflow.add_edge("reconocimiento", "agente_decisor")
-    workflow.add_conditional_edges(
+    builder.add_node("reconocimiento", nodo_reconocimiento)
+    builder.add_node("agente_decisor", nodo_agente_decisor)
+    builder.add_node("generar_reporte", nodo_generador_reporte)
+
+    builder.set_entry_point("reconocimiento")
+    builder.add_edge("reconocimiento", "agente_decisor")
+    builder.add_conditional_edges(
         "agente_decisor",
         decidir_siguiente_paso,
         {
             "agente_decisor": "agente_decisor",
-            "generar_reporte": "generar_reporte"
-        }
+            "generar_reporte": "generar_reporte",
+        },
     )
-    workflow.add_edge("generar_reporte", END)
-    return workflow.compile()
+    builder.add_edge("generar_reporte", END)
+
+    return builder.compile()
 
 
-agente_app = construir_grafo()
+def ejecutar_auditoria(objetivo: str, modelo: str = MODELO_DEFAULT) -> dict:
+    grafo = construir_grafo()
+    estado_inicial = {
+        "objetivo": objetivo,
+        "modelo": modelo,
+        "hallazgos": [],
+        "herramientas_usadas": [],
+        "iteracion": 0,
+        "reporte": "",
+        "messages": [],
+        "pensamiento": "",
+    }
+    resultado = grafo.invoke(estado_inicial)
+    return resultado
