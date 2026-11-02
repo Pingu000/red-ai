@@ -2,6 +2,10 @@
 Red-AI — Dashboard Streamlit
 Streaming en tiempo real vía threading + queue
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import streamlit as st
 import threading
 import queue
