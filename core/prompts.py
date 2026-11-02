@@ -52,7 +52,9 @@ PROMPT_ANALISIS = """
 ESTADO ACTUAL DE LA AUDITORÍA:
 - Objetivo: {objetivo}
 - Iteración: {iteracion}
-- Herramientas/URLs YA VISITADAS (NO repetir ninguna): {herramientas_usadas}
+- Herramientas ya usadas: {herramientas_usadas}
+URLs YA VISITADAS CON CURL — NO visitar ninguna de estas:
+  {urls_visitadas}
 
 HALLAZGOS RECIENTES:
 {hallazgos}

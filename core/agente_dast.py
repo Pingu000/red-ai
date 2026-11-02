@@ -16,6 +16,21 @@ from langgraph.graph import StateGraph, END
 from core.herramientas import TODAS_LAS_HERRAMIENTAS, MAPA_HERRAMIENTAS
 from core.prompts import SYSTEM_PROMPT, PROMPT_ANALISIS, PROMPT_REPORTE
 
+def _urls_visitadas(hallazgos: list) -> list:
+    """Extrae URLs ya visitadas con curl desde los hallazgos."""
+    urls = []
+    for h in hallazgos:
+        if "[CURL]" in h or "[HERRAMIENTA_CURL]" in h:
+            for token in h.split():
+                if token.startswith("http://") or token.startswith("https://"):
+                    urls.append(token.rstrip('.,;"'))
+    return list(dict.fromkeys(urls))
+
+
+
+
+
+
 # ─── Configuración ────────────────────────────────────────────────────────────
 OLLAMA_URL = "http://192.168.56.1:11434"
 MODELO_DEFAULT = "qwen2.5-coder:14b"
@@ -174,10 +189,13 @@ def nodo_agente_decisor(state: AgentState) -> dict:
     hallazgos_recientes = hallazgos[-8:]  # últimos 8 hallazgos
     hallazgos_str = "\n\n".join(hallazgos_recientes)
 
+    urls_ya_vistas = _urls_visitadas(hallazgos)
+    urls_str = "\n  - ".join(urls_ya_vistas) if urls_ya_vistas else "ninguna"
     prompt_usuario = PROMPT_ANALISIS.format(
         objetivo=objetivo,
         iteracion=iteracion,
         herramientas_usadas=", ".join(herramientas_usadas) if herramientas_usadas else "ninguna",
+        urls_visitadas=urls_str,
         hallazgos=hallazgos_str[:4000],
     )
 
