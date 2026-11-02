@@ -58,14 +58,30 @@ def herramienta_whatweb(objetivo: str) -> str:
 @tool
 def herramienta_gobuster(objetivo: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt") -> str:
     """
-    Enumera directorios y archivos ocultos mediante fuerza bruta de rutas.
-    Úsala para descubrir paneles de admin, backups, APIs no documentadas, etc.
+    Enumera DIRECTORIOS ocultos mediante fuerza bruta (sin extensión).
+    Úsala para descubrir /admin, /login, /api, /backup, paneles de administración, etc.
+    Los directorios web normalmente no tienen extensión.
     Args:
         objetivo: URL base del objetivo (ej: 'http://192.168.1.10')
         wordlist: Ruta a la wordlist. Por defecto usa dirb/common.txt de Kali.
     """
     print(f"\n[GOBUSTER] Enumerando directorios en: {objetivo}")
     cmd = ['gobuster', 'dir', '-u', objetivo, '-w', wordlist, '-t', '20', '--no-color', '-q']
+    return _ejecutar_comando(cmd, timeout=180)
+
+
+@tool
+def herramienta_gobuster_archivos(objetivo: str, wordlist: str = "/usr/share/wordlists/dirb/common.txt") -> str:
+    """
+    Enumera ARCHIVOS con extensión en servidores ASP/IIS, PHP o similares.
+    Úsala cuando el servidor sea IIS/ASP.NET o PHP para encontrar Login.asp,
+    Search.aspx, config.php, etc. que no aparecen en la búsqueda de directorios.
+    Args:
+        objetivo: URL base del objetivo (ej: 'http://192.168.1.10')
+        wordlist: Ruta a la wordlist. Por defecto usa dirb/common.txt de Kali.
+    """
+    print(f"\n[GOBUSTER-ARCHIVOS] Buscando archivos .asp/.aspx/.php en: {objetivo}")
+    cmd = ['gobuster', 'dir', '-u', objetivo, '-w', wordlist, '-t', '20', '--no-color', '-q', '-x', 'asp,aspx,php,html,txt,bak']
     return _ejecutar_comando(cmd, timeout=180)
 
 
@@ -126,6 +142,7 @@ TODAS_LAS_HERRAMIENTAS = [
     herramienta_nmap,
     herramienta_whatweb,
     herramienta_gobuster,
+    herramienta_gobuster_archivos,
     herramienta_nikto,
     herramienta_curl,
     herramienta_sqlmap,

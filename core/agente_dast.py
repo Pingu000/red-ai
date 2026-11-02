@@ -212,7 +212,12 @@ def nodo_agente_decisor(state: AgentState) -> dict:
                     resultado_str = str(resultado)
                     print(f"\033[92m[✓ RESULTADO]\033[0m {resultado_str[:300]}...")
                     nuevos_hallazgos.append(f"[{nombre.upper()}]\n{resultado_str}")
-                    nuevas_herramientas.append(nombre)
+                    # Para curl, trackear nombre+url para permitir múltiples URLs distintas
+                    if nombre == "herramienta_curl":
+                        url_usada = args.get("url", "")
+                        nuevas_herramientas.append(f"herramienta_curl:{url_usada}")
+                    else:
+                        nuevas_herramientas.append(nombre)
                 except Exception as e:
                     err = f"Error en {nombre}: {e}"
                     print(f"\033[91m[✗ ERROR]\033[0m {err}")
@@ -225,7 +230,7 @@ def nodo_agente_decisor(state: AgentState) -> dict:
         resultado_parser = _intentar_ejecutar_desde_texto(content)
         if resultado_parser:
             nombre_tool, resultado_str = resultado_parser
-            print(f"\033[92m[✓ PARSER]\033[0m {nombre_tool}: {resultado_str[:300]}...")
+            print(f"\033[92m[\u2713 PARSER]\033[0m {nombre_tool}: {resultado_str[:300]}...")
             nuevos_hallazgos.append(f"[{nombre_tool.upper()}]\n{resultado_str}")
             nuevas_herramientas.append(nombre_tool)
         elif "AUDITORIA_COMPLETA" in content:

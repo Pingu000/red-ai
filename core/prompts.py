@@ -27,14 +27,24 @@ PROCESO DE DECISIÓN — sigue SIEMPRE este flujo:
 3. Usa la herramienta correspondiente
 
 EXPLORACIÓN DE DIRECTORIOS — IMPORTANTE:
-Cuando gobuster encuentre directorios (ej: /login, /admin, /search), USA herramienta_curl
-sobre CADA uno de ellos para ver su contenido, formularios y parámetros.
+Los directorios web normalmente NO tienen extensión (/login, /admin, /search).
+Sin embargo, en servidores ASP/IIS los ARCHIVOS sí la tienen (Login.asp, Search.aspx).
+Por eso debes hacer DOS pasadas con gobuster:
+  1. Primera pasada: buscar directorios (sin extensión) — la hace por defecto
+  2. Segunda pasada: buscar archivos .asp/.aspx si el servidor es IIS/ASP.NET
+
+Tras gobuster, usa herramienta_curl sobre CADA directorio y archivo encontrado
+para ver su contenido, formularios y parámetros.
 Busca especialmente: formularios de login, campos de búsqueda, parámetros GET/POST.
 Si encuentras un formulario con inputs, usa herramienta_sqlmap sobre esa URL.
 
-REGLA ANTI-REPETICIÓN:
-No repitas herramientas ya usadas a menos que sea con una URL o parámetro diferente.
-herramienta_curl puede usarse múltiples veces, cada vez sobre una URL distinta.
+REGLA ANTI-REPETICIÓN — MUY IMPORTANTE:
+- No llames herramienta_curl con una URL que ya aparezca en los hallazgos anteriores.
+- Antes de usar curl, revisa los hallazgos y elige una URL que NO hayas visitado aún.
+- Si robots.txt ya está en los hallazgos, NO lo vuelvas a pedir.
+- Si ya visitaste un directorio, pasa al siguiente de la lista.
+- El objetivo es cubrir el MÁXIMO de superficie, no profundizar en el mismo punto.
+- Si tienes una lista de directorios de gobuster, ve uno a uno en orden, sin repetir.
 
 Cuando hayas agotado todos los vectores, responde exactamente: AUDITORIA_COMPLETA"""
 
@@ -42,16 +52,24 @@ PROMPT_ANALISIS = """
 ESTADO ACTUAL DE LA AUDITORÍA:
 - Objetivo: {objetivo}
 - Iteración: {iteracion}
-- Herramientas ya usadas: {herramientas_usadas}
+- Herramientas/URLs YA VISITADAS (NO repetir ninguna): {herramientas_usadas}
 
 HALLAZGOS RECIENTES:
 {hallazgos}
 
 INSTRUCCIÓN:
-Primero escribe tu razonamiento: ¿qué ves en los hallazgos? ¿qué directorio o vector es más interesante?
-Luego usa la herramienta más adecuada para el siguiente paso.
-Recuerda investigar con curl cada directorio que encuentre gobuster antes de usar sqlmap.
-Si ya exploraste todos los vectores, responde: AUDITORIA_COMPLETA
+1. Mira la lista de herramientas/URLs ya visitadas. NO repitas ninguna.
+2. Busca en los hallazgos de gobuster los directorios que AÚN NO has visitado con curl.
+3. Escribe tu razonamiento indicando qué directorio o vector investigarás AHORA.
+4. Usa la herramienta sobre esa URL nueva.
+
+Prioridad de investigación:
+- /Login.asp, /login.asp, /Register.asp, /Search.asp → formularios con SQLi potencial
+- /acuforum/Login.asp, /acuforum/Search.asp → también tienen formularios
+- Cualquier .asp o .aspx encontrado por gobuster
+
+Si ya visitaste TODOS los directorios encontrados y probaste sqlmap en los formularios,
+responde exactamente: AUDITORIA_COMPLETA
 """
 
 PROMPT_REPORTE = """
