@@ -1,10 +1,29 @@
 # Entornos virtuales
 venv/
 env/
+.venv/
 
 # Archivos compilados
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
 # Variables de entorno
 .env
+.env.*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Logs y reportes generados
+reportes/
+*.log
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db

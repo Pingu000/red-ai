@@ -1,3 +1,4 @@
+import os
 """
 Agente DAST principal — Red-AI
 LangGraph + Ollama (en host Windows vía Host-Only adapter)
@@ -32,7 +33,7 @@ def _urls_visitadas(hallazgos: list) -> list:
 
 
 # ─── Configuración ────────────────────────────────────────────────────────────
-OLLAMA_URL = "http://192.168.56.1:11434"
+OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODELO_DEFAULT = "qwen2.5-coder:14b"
 
 # ─── Estado del grafo ─────────────────────────────────────────────────────────
