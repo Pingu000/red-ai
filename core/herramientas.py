@@ -99,7 +99,11 @@ def herramienta_gobuster_archivos(objetivo: str, wordlist: str = "/usr/share/wor
         wordlist: Ruta a la wordlist. Por defecto usa dirb/common.txt de Kali.
     """
     print(f"\n[GOBUSTER-ARCHIVOS] Buscando archivos .asp/.aspx/.php en: {objetivo}")
-    cmd = ['gobuster', 'dir', '-u', objetivo, '-w', wordlist, '-t', '20', '--no-color', '-q', '-x', 'asp,aspx,php,html,txt,bak']
+    # small.txt (~900 palabras) da buena cobertura sin la lentitud de common.txt con extensiones
+    wordlist_small = "/usr/share/wordlists/dirb/small.txt"
+    import os as _os
+    wl = wordlist_small if _os.path.exists(wordlist_small) else wordlist
+    cmd = ['gobuster', 'dir', '-u', objetivo, '-w', wl, '-t', '20', '--no-color', '-q', '-x', 'asp,aspx,php,html,txt,bak']
     return _ejecutar_comando(cmd, timeout=180)
 
 
@@ -141,7 +145,7 @@ def herramienta_nikto(objetivo: str) -> str:
     """
     print(f"\n[NIKTO] Analizando vulnerabilidades en: {objetivo}")
     cmd = ['nikto', '-h', objetivo, '-nointeractive']
-    return _ejecutar_comando(cmd, timeout=180)
+    return _ejecutar_comando(cmd, timeout=300)
 
 
 @tool
@@ -158,11 +162,9 @@ def herramienta_nuclei(objetivo: str, templates: str = "cves,exposures,misconfig
                    default-logins, technologies, takeovers, network
     """
     print(f"\n[NUCLEI] Escaneando con templates [{templates}]: {objetivo}")
-    # Construir lista de tags -t para cada categoría
-    template_flags = []
-    for t in templates.split(','):
-        template_flags += ['-t', t.strip()]
-    cmd = ['nuclei', '-u', objetivo] + template_flags + ['-silent', '-no-color']
+    # -tags acepta lista separada por comas directamente
+    tags = ','.join(t.strip() for t in templates.split(','))
+    cmd = ['nuclei', '-u', objetivo, '-tags', tags, '-silent', '-no-color']
     return _ejecutar_comando(cmd, timeout=300)
 
 

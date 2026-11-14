@@ -77,11 +77,8 @@ class QueueWriter(io.TextIOBase):
 
     def write(self, text: str) -> int:
         if text and text.strip():
-            # Detectar pensamiento (líneas en amarillo desde el agente)
-            if "💭 RAZONAMIENTO" in text or (
-                not text.startswith("[") and len(text) > 20
-                and "─" not in text and "=" not in text
-            ):
+            # Solo va a "pensamiento" lo que el agente marque explícitamente como razonamiento
+            if "💭 RAZONAMIENTO" in text or "RAZONAMIENTO" in text:
                 self.q.put(("pensamiento_raw", text))
             else:
                 self.q.put(("log", text))
