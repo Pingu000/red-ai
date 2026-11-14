@@ -53,7 +53,8 @@ def _crear_llm(modelo: str, temperature: float = 0, con_tools: bool = False):
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY no configurada. Introdúcela en el dashboard.")
-        llm = ChatAnthropic(model=modelo, api_key=api_key, temperature=temperature)
+        # Claude API no acepta temperature con tool use — se omite intencionalmente
+        llm = ChatAnthropic(model=modelo, api_key=api_key)
     else:
         llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=temperature)
     if con_tools:
