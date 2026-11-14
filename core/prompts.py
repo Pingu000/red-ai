@@ -86,19 +86,38 @@ URLs YA VISITADAS CON CURL — NO visitar ninguna de estas:
 HALLAZGOS RECIENTES:
 {hallazgos}
 
+CHECKLIST OBLIGATORIO — debes completar TODAS estas fases antes de declarar AUDITORIA_COMPLETA:
+
+FASE 1 — RECONOCIMIENTO (obligatorio si no está en herramientas_usadas):
+  □ herramienta_nmap — escanear puertos y servicios
+  □ herramienta_whatweb — identificar tecnologías
+  □ herramienta_wafw00f — detectar WAF
+
+FASE 2 — ENUMERACIÓN (obligatorio):
+  □ herramienta_gobuster — enumerar directorios
+  □ herramienta_gobuster_archivos — buscar archivos con extensión
+  □ herramienta_ffuf — fuzzing adicional si gobuster encontró poco
+
+FASE 3 — ANÁLISIS DE CONTENIDO (obligatorio):
+  □ herramienta_curl — visitar CADA directorio/ruta encontrada por gobuster (uno por iteración)
+  □ herramienta_nikto — análisis de vulnerabilidades web
+
+FASE 4 — EXPLOTACIÓN (usar cuando encuentres vectores):
+  □ herramienta_sqlmap — en URLs con formularios o parámetros GET/POST
+  □ herramienta_dalfox — en parámetros de entrada para XSS
+  □ herramienta_nuclei — escaneo de vulnerabilidades conocidas
+  □ herramienta_commix — en parámetros que ejecuten comandos
+  □ herramienta_hydra — en paneles de login encontrados
+  □ herramienta_searchsploit — buscar exploits para versiones detectadas por nmap
+
 INSTRUCCIÓN:
-1. Mira la lista de herramientas/URLs ya visitadas. NO repitas ninguna.
-2. Busca en los hallazgos de gobuster los directorios que AÚN NO has visitado con curl.
-3. Escribe tu razonamiento indicando qué directorio o vector investigarás AHORA.
-4. Usa la herramienta sobre esa URL nueva.
+1. Revisa el checklist: ¿qué fases NO están completadas todavía?
+2. Elige la siguiente herramienta pendiente según el orden de fases.
+3. Si hay directorios de gobuster sin visitar con curl, visítalos UNO A UNO.
+4. Escribe tu razonamiento y usa la herramienta.
 
-Prioridad de investigación:
-- /Login.asp, /login.asp, /Register.asp, /Search.asp → formularios con SQLi potencial
-- /acuforum/Login.asp, /acuforum/Search.asp → también tienen formularios
-- Cualquier .asp o .aspx encontrado por gobuster
-
-Si ya visitaste TODOS los directorios encontrados y probaste sqlmap en los formularios,
-responde exactamente: AUDITORIA_COMPLETA
+SOLO responde AUDITORIA_COMPLETA cuando hayas completado las 4 fases Y no queden
+directorios sin explorar ni vectores de explotación sin probar.
 """
 
 PROMPT_REPORTE = """

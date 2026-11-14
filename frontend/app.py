@@ -12,6 +12,7 @@ import queue
 import time
 import sys
 import io
+import re
 import requests
 
 from core.agente_dast import ejecutar_auditoria, OLLAMA_URL, MODELO_DEFAULT
@@ -71,17 +72,20 @@ def obtener_modelos_ollama() -> list[str]:
 
 # ─── QueueWriter (redirige stdout al queue) ───────────────────────────────────
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m|\[[0-9]+m")
+
 class QueueWriter(io.TextIOBase):
     def __init__(self, q: queue.Queue):
         self.q = q
 
     def write(self, text: str) -> int:
         if text and text.strip():
+            clean = _ANSI_ESCAPE.sub("", text)
             # Solo va a "pensamiento" lo que el agente marque explícitamente como razonamiento
-            if "💭 RAZONAMIENTO" in text or "RAZONAMIENTO" in text:
-                self.q.put(("pensamiento_raw", text))
+            if "💭 RAZONAMIENTO" in clean or "RAZONAMIENTO" in clean:
+                self.q.put(("pensamiento_raw", clean))
             else:
-                self.q.put(("log", text))
+                self.q.put(("log", clean))
         return len(text)
 
     def flush(self):
