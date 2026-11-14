@@ -1,8 +1,8 @@
-import os
 """
 Agente DAST principal — Red-AI
-LangGraph + Ollama (en host Windows vía Host-Only adapter)
+LangGraph + Ollama / Anthropic Claude
 """
+import os
 import operator
 import json
 import re
@@ -41,7 +41,7 @@ def _urls_visitadas(hallazgos: list) -> list:
 # ─── Configuración ────────────────────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODELO_DEFAULT = "qwen2.5-coder:14b"
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# ANTHROPIC_API_KEY se lee en tiempo de ejecución en _crear_llm para capturar la key inyectada por la UI
 
 
 def _crear_llm(modelo: str, temperature: float = 0, con_tools: bool = False):
@@ -49,9 +49,10 @@ def _crear_llm(modelo: str, temperature: float = 0, con_tools: bool = False):
     if modelo.startswith("claude-"):
         if not ANTHROPIC_DISPONIBLE:
             raise ImportError("langchain-anthropic no instalado. Ejecuta: pip install langchain-anthropic")
-        api_key = ANTHROPIC_API_KEY
+        # Leer en tiempo de ejecución para capturar la key inyectada por la UI de Streamlit
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY no configurada")
+            raise ValueError("ANTHROPIC_API_KEY no configurada. Introdúcela en el dashboard.")
         llm = ChatAnthropic(model=modelo, api_key=api_key, temperature=temperature)
     else:
         llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=temperature)
