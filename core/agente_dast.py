@@ -10,6 +10,12 @@ import sys
 from typing import TypedDict, Annotated, List
 
 from langchain_ollama import ChatOllama
+try:
+    from langchain_anthropic import ChatAnthropic
+    ANTHROPIC_DISPONIBLE = True
+except ImportError:
+    ANTHROPIC_DISPONIBLE = False
+
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from langgraph.graph import StateGraph, END
@@ -35,6 +41,23 @@ def _urls_visitadas(hallazgos: list) -> list:
 # ─── Configuración ────────────────────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODELO_DEFAULT = "qwen2.5-coder:14b"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+
+def _crear_llm(modelo: str, temperature: float = 0, con_tools: bool = False):
+    """Crea el LLM adecuado según el modelo especificado."""
+    if modelo.startswith("claude-"):
+        if not ANTHROPIC_DISPONIBLE:
+            raise ImportError("langchain-anthropic no instalado. Ejecuta: pip install langchain-anthropic")
+        api_key = ANTHROPIC_API_KEY
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY no configurada")
+        llm = ChatAnthropic(model=modelo, api_key=api_key, temperature=temperature)
+    else:
+        llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=temperature)
+    if con_tools:
+        return llm.bind_tools(TODAS_LAS_HERRAMIENTAS)
+    return llm
 
 # ─── Estado del grafo ─────────────────────────────────────────────────────────
 class AgentState(TypedDict):
@@ -134,7 +157,7 @@ def nodo_reconocimiento(state: AgentState) -> dict:
     print(f"[RECONOCIMIENTO] Objetivo: {objetivo}")
     print('='*60)
 
-    llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=0)
+    llm = _crear_llm(modelo, temperature=0)
     hallazgos = []
     herramientas_usadas = []
 
@@ -180,11 +203,7 @@ def nodo_agente_decisor(state: AgentState) -> dict:
     print(f"[AGENTE] Iteración #{iteracion} | Modelo: {modelo}")
     print(f"[AGENTE] Herramientas usadas hasta ahora: {herramientas_usadas}")
 
-    llm = ChatOllama(
-        base_url=OLLAMA_URL,
-        model=modelo,
-        temperature=0.1,
-    ).bind_tools(TODAS_LAS_HERRAMIENTAS)
+    llm = _crear_llm(modelo, temperature=0.1, con_tools=True)
 
     # Construir prompt
     hallazgos_recientes = hallazgos[-8:]  # últimos 8 hallazgos
@@ -289,7 +308,7 @@ def nodo_generador_reporte(state: AgentState) -> dict:
 
     hallazgos_str = "\n\n---\n\n".join(hallazgos_truncados)
 
-    llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=0)
+    llm = _crear_llm(modelo, temperature=0)
     prompt = PROMPT_REPORTE.format(objetivo=objetivo, hallazgos=hallazgos_str)
 
     try:

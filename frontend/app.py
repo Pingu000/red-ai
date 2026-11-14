@@ -144,23 +144,62 @@ with st.sidebar:
     st.markdown("*Agente autónomo de pentesting web*")
     st.divider()
 
-    # Selector de modelo dinámico
+    # Selector de proveedor
     st.markdown("### 🤖 Modelo")
-    modelos_disponibles = obtener_modelos_ollama()
-    # Intentar seleccionar 32b por defecto si está disponible
-    idx_default = 0
-    for i, m in enumerate(modelos_disponibles):
-        if "32b" in m:
-            idx_default = i
-            break
-
-    modelo_elegido = st.selectbox(
-        "Modelo Ollama",
-        options=modelos_disponibles,
-        index=idx_default,
-        help="Modelos disponibles en tu instancia de Ollama",
+    proveedor = st.radio(
+        "Proveedor",
+        options=["Ollama (local)", "Claude (API)"],
+        horizontal=True,
         disabled=st.session_state.corriendo,
     )
+
+    if proveedor == "Claude (API)":
+        # API key: primero variable de entorno, si no input manual
+        api_key_env = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key_env:
+            st.success("✅ ANTHROPIC_API_KEY detectada en entorno")
+            api_key_input = api_key_env
+        else:
+            api_key_input = st.text_input(
+                "Anthropic API Key",
+                type="password",
+                placeholder="sk-ant-...",
+                help="Obtén tu API key en platform.anthropic.com",
+                disabled=st.session_state.corriendo,
+            )
+
+        CLAUDE_MODELOS = [
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "claude-opus-4-5",
+            "claude-sonnet-4-6",
+        ]
+        modelo_elegido = st.selectbox(
+            "Modelo Claude",
+            options=CLAUDE_MODELOS,
+            index=0,
+            help="claude-sonnet-4-5 es el mejor balance calidad/coste",
+            disabled=st.session_state.corriendo,
+        )
+        # Inyectar API key en entorno para que agente_dast la recoja
+        if api_key_input:
+            os.environ["ANTHROPIC_API_KEY"] = api_key_input
+
+    else:
+        api_key_input = ""
+        modelos_disponibles = obtener_modelos_ollama()
+        idx_default = 0
+        for i, m in enumerate(modelos_disponibles):
+            if "32b" in m:
+                idx_default = i
+                break
+        modelo_elegido = st.selectbox(
+            "Modelo Ollama",
+            options=modelos_disponibles,
+            index=idx_default,
+            help="Modelos disponibles en tu instancia de Ollama",
+            disabled=st.session_state.corriendo,
+        )
 
     st.divider()
     st.markdown("### 🎯 Objetivo")
@@ -175,9 +214,15 @@ with st.sidebar:
 
     st.divider()
 
+    # Validación antes de lanzar
+    _claude_listo = (proveedor == "Ollama (local)") or bool(api_key_input)
+
     # Botón iniciar / detener
     if not st.session_state.corriendo:
-        if st.button("🚀 Iniciar Auditoría", use_container_width=True, type="primary"):
+        if proveedor == "Claude (API)" and not api_key_input:
+            st.warning("⚠️ Introduce tu Anthropic API key para continuar.")
+        if st.button("🚀 Iniciar Auditoría", use_container_width=True, type="primary",
+                     disabled=not _claude_listo):
             if objetivo:
                 # Reset estado
                 st.session_state.logs = []
@@ -204,7 +249,10 @@ with st.sidebar:
         st.button("⏳ Auditando...", use_container_width=True, disabled=True)
 
     st.divider()
-    st.markdown(f"**Ollama:** `{OLLAMA_URL}`")
+    if proveedor == "Ollama (local)":
+        st.markdown(f"**Ollama:** `{OLLAMA_URL}`")
+    else:
+        st.markdown("**Proveedor:** `Anthropic API`")
     st.markdown(f"**Modelo activo:** `{modelo_elegido}`")
 
 
