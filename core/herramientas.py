@@ -39,8 +39,10 @@ def herramienta_nmap(objetivo: str, opciones: str = "-sV -sC -T4 --top-ports 100
         objetivo: IP, dominio o rango (ej: '192.168.1.1' o 'ejemplo.com')
         opciones: Flags de nmap. Por defecto detecta servicios y versiones.
     """
-    print(f"\n[NMAP] Escaneando: {objetivo}")
-    cmd = ['nmap'] + opciones.split() + [objetivo]
+    # nmap no acepta prefijos http:// — se eliminan si los incluye el agente
+    objetivo_nmap = objetivo.replace("https://", "").replace("http://", "").rstrip("/")
+    print(f"\n[NMAP] Escaneando: {objetivo_nmap}")
+    cmd = ['nmap'] + opciones.split() + [objetivo_nmap]
     return _ejecutar_comando(cmd, timeout=120)
 
 
