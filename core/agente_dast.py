@@ -16,9 +16,10 @@ try:
 except ImportError:
     ANTHROPIC_DISPONIBLE = False
 
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from core.herramientas import TODAS_LAS_HERRAMIENTAS, MAPA_HERRAMIENTAS
 from core.prompts import SYSTEM_PROMPT, PROMPT_ANALISIS, PROMPT_REPORTE
@@ -34,14 +35,9 @@ def _urls_visitadas(hallazgos: list) -> list:
     return list(dict.fromkeys(urls))
 
 
-
-
-
-
 # ─── Configuración ────────────────────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 MODELO_DEFAULT = "qwen2.5-coder:14b"
-# ANTHROPIC_API_KEY se lee en tiempo de ejecución en _crear_llm para capturar la key inyectada por la UI
 
 
 def _crear_llm(modelo: str, temperature: float = 0, con_tools: bool = False):
@@ -49,17 +45,16 @@ def _crear_llm(modelo: str, temperature: float = 0, con_tools: bool = False):
     if modelo.startswith("claude-"):
         if not ANTHROPIC_DISPONIBLE:
             raise ImportError("langchain-anthropic no instalado. Ejecuta: pip install langchain-anthropic")
-        # Leer en tiempo de ejecución para capturar la key inyectada por la UI de Streamlit
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY no configurada. Introdúcela en el dashboard.")
-        # Claude API no acepta temperature con tool use — se omite intencionalmente
         llm = ChatAnthropic(model=modelo, api_key=api_key)
     else:
         llm = ChatOllama(base_url=OLLAMA_URL, model=modelo, temperature=temperature)
     if con_tools:
         return llm.bind_tools(TODAS_LAS_HERRAMIENTAS)
     return llm
+
 
 # ─── Estado del grafo ─────────────────────────────────────────────────────────
 class AgentState(TypedDict):
@@ -69,8 +64,10 @@ class AgentState(TypedDict):
     herramientas_usadas: Annotated[List[str], operator.add]
     iteracion: int
     reporte: str
+    # Historial completo de mensajes — acumulado con operator.add
+    # Esto ES la memoria: cada iteración añade sus mensajes al historial
     messages: Annotated[List, operator.add]
-    pensamiento: str   # último razonamiento del modelo en texto libre
+    pensamiento: str
 
 
 # ─── Parser de emergencia ─────────────────────────────────────────────────────
@@ -130,9 +127,7 @@ def _extraer_pensamiento(content: str) -> str:
     Extrae el texto de razonamiento antes del JSON / tool call.
     Todo lo que no es el bloque JSON se considera pensamiento.
     """
-    # Quita bloques de código markdown
     sin_code = re.sub(r'```[^`]*```', '', content, flags=re.DOTALL)
-    # Quita el primer bloque JSON
     depth = 0
     start_json = None
     for i, ch in enumerate(sin_code):
@@ -185,11 +180,20 @@ def nodo_reconocimiento(state: AgentState) -> dict:
     except Exception as e:
         hallazgos.append(f"[WHATWEB] Error: {e}")
 
+    # El primer mensaje del historial es el system prompt + contexto inicial
+    mensaje_inicial = SystemMessage(content=SYSTEM_PROMPT)
+    contexto_inicial = HumanMessage(content=(
+        f"Iniciando auditoría sobre: {objetivo}\n\n"
+        f"Reconocimiento inicial completado:\n\n"
+        + "\n\n".join(hallazgos)
+    ))
+
     return {
         "hallazgos": hallazgos,
         "herramientas_usadas": herramientas_usadas,
         "iteracion": 0,
-        "messages": [],
+        # Inicializamos el historial con el system prompt y el contexto de reconocimiento
+        "messages": [mensaje_inicial, contexto_inicial],
         "pensamiento": "",
     }
 
@@ -200,34 +204,38 @@ def nodo_agente_decisor(state: AgentState) -> dict:
     hallazgos = state.get("hallazgos", [])
     herramientas_usadas = state.get("herramientas_usadas", [])
     iteracion = state.get("iteracion", 0) + 1
+    messages = state.get("messages", [])
 
     print(f"\n{'─'*60}")
     print(f"[AGENTE] Iteración #{iteracion} | Modelo: {modelo}")
-    print(f"[AGENTE] Herramientas usadas hasta ahora: {herramientas_usadas}")
+    print(f"[AGENTE] Herramientas usadas: {herramientas_usadas}")
+    print(f"[AGENTE] Mensajes en historial: {len(messages)}")
 
     llm = _crear_llm(modelo, temperature=0.1, con_tools=True)
 
-    # Construir prompt
-    hallazgos_recientes = hallazgos[-8:]  # últimos 8 hallazgos
-    hallazgos_str = "\n\n".join(hallazgos_recientes)
-
+    # Construir el mensaje de esta iteración con contexto resumido de lo nuevo
     urls_ya_vistas = _urls_visitadas(hallazgos)
     urls_str = "\n  - ".join(urls_ya_vistas) if urls_ya_vistas else "ninguna"
-    prompt_usuario = PROMPT_ANALISIS.format(
+
+    # Solo los hallazgos recientes (últimos 3) como contexto del turno actual
+    # El modelo YA tiene todo el historial anterior en messages[]
+    hallazgos_recientes = hallazgos[-3:]
+    hallazgos_str = "\n\n".join(h[:600] for h in hallazgos_recientes)
+
+    prompt_turno = PROMPT_ANALISIS.format(
         objetivo=objetivo,
         iteracion=iteracion,
         herramientas_usadas=", ".join(herramientas_usadas) if herramientas_usadas else "ninguna",
         urls_visitadas=urls_str,
-        hallazgos=hallazgos_str[:4000],
+        hallazgos=hallazgos_str,
     )
 
-    mensajes = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt_usuario},
-    ]
+    # Añadir el mensaje del turno actual al historial acumulado
+    nuevo_mensaje_usuario = HumanMessage(content=prompt_turno)
+    historial_completo = messages + [nuevo_mensaje_usuario]
 
-    print(f"\n[AGENTE] Enviando prompt al LLM...")
-    respuesta = llm.invoke(mensajes)
+    print(f"\n[AGENTE] Enviando historial completo al LLM ({len(historial_completo)} mensajes)...")
+    respuesta = llm.invoke(historial_completo)
     content = respuesta.content if isinstance(respuesta.content, str) else ""
 
     # ── Extraer y mostrar pensamiento ───────────────────────────────────────
@@ -239,6 +247,8 @@ def nodo_agente_decisor(state: AgentState) -> dict:
     # ── Procesar tool calls nativos ─────────────────────────────────────────
     nuevos_hallazgos = []
     nuevas_herramientas = []
+    # Mensajes nuevos de este turno: el mensaje usuario + la respuesta del modelo
+    nuevos_messages = [nuevo_mensaje_usuario, respuesta]
 
     if hasattr(respuesta, "tool_calls") and respuesta.tool_calls:
         for tc in respuesta.tool_calls:
@@ -251,8 +261,16 @@ def nodo_agente_decisor(state: AgentState) -> dict:
                     resultado = MAPA_HERRAMIENTAS[nombre].invoke(args)
                     resultado_str = str(resultado)
                     print(f"\033[92m[✓ RESULTADO]\033[0m {resultado_str[:300]}...")
+
+                    # Añadir el resultado como ToolMessage al historial
+                    tool_msg = ToolMessage(
+                        content=resultado_str[:3000],  # truncar para no explotar el contexto
+                        tool_call_id=tc.get("id", nombre),
+                        name=nombre,
+                    )
+                    nuevos_messages.append(tool_msg)
+
                     nuevos_hallazgos.append(f"[{nombre.upper()}]\n{resultado_str}")
-                    # Para curl, trackear nombre+url para permitir múltiples URLs distintas
                     if nombre == "herramienta_curl":
                         url_usada = args.get("url", "")
                         nuevas_herramientas.append(f"herramienta_curl:{url_usada}")
@@ -262,15 +280,20 @@ def nodo_agente_decisor(state: AgentState) -> dict:
                     err = f"Error en {nombre}: {e}"
                     print(f"\033[91m[✗ ERROR]\033[0m {err}")
                     nuevos_hallazgos.append(f"[{nombre.upper()}] {err}")
+                    tool_msg = ToolMessage(
+                        content=err,
+                        tool_call_id=tc.get("id", nombre),
+                        name=nombre,
+                    )
+                    nuevos_messages.append(tool_msg)
             else:
                 print(f"\033[91m[✗]\033[0m Herramienta desconocida: {nombre}")
 
     elif content:
-        # Intentar parser de emergencia
         resultado_parser = _intentar_ejecutar_desde_texto(content)
         if resultado_parser:
             nombre_tool, resultado_str = resultado_parser
-            print(f"\033[92m[\u2713 PARSER]\033[0m {nombre_tool}: {resultado_str[:300]}...")
+            print(f"\033[92m[✓ PARSER]\033[0m {nombre_tool}: {resultado_str[:300]}...")
             nuevos_hallazgos.append(f"[{nombre_tool.upper()}]\n{resultado_str}")
             nuevas_herramientas.append(nombre_tool)
         elif "AUDITORIA_COMPLETA" in content:
@@ -283,7 +306,8 @@ def nodo_agente_decisor(state: AgentState) -> dict:
         "hallazgos": nuevos_hallazgos,
         "herramientas_usadas": nuevas_herramientas,
         "iteracion": iteracion,
-        "messages": [respuesta],
+        # Acumulamos los mensajes nuevos de este turno (usuario + respuesta + tool results)
+        "messages": nuevos_messages,
         "pensamiento": pensamiento,
     }
 
@@ -296,7 +320,6 @@ def nodo_generador_reporte(state: AgentState) -> dict:
     print(f"\n{'='*60}")
     print(f"[REPORTE] Generando reporte final con modelo {modelo}...")
 
-    # Truncar hallazgos para no saturar el contexto
     MAX_CHARS_HALLAZGO = 600
     MAX_TOTAL = 5000
     hallazgos_truncados = []
@@ -318,7 +341,6 @@ def nodo_generador_reporte(state: AgentState) -> dict:
         reporte = respuesta.content
     except Exception as e:
         print(f"[REPORTE] Error generando reporte: {e}")
-        # Fallback: reporte manual
         reporte = f"# Reporte de Auditoría — {objetivo}\n\n"
         reporte += "## Hallazgos\n\n"
         for h in hallazgos[:10]:
@@ -334,14 +356,11 @@ def decidir_siguiente_paso(state: AgentState) -> str:
     hallazgos = state.get("hallazgos", [])
     iteracion = state.get("iteracion", 0)
 
-    # Comprobar señal de fin
     for h in hallazgos[-3:]:
         if "AUDITORIA_COMPLETA" in h:
             print(f"\n[ROUTER] AUDITORIA_COMPLETA → generando reporte")
             return "generar_reporte"
 
-    # Sin límite de iteraciones — continúa hasta AUDITORIA_COMPLETA
-    # (soft-cap de seguridad en 50 para evitar bucles infinitos reales)
     if iteracion >= 50:
         print(f"\n[ROUTER] Soft-cap de seguridad (50 iter) → generando reporte")
         return "generar_reporte"
@@ -350,7 +369,12 @@ def decidir_siguiente_paso(state: AgentState) -> str:
     return "agente_decisor"
 
 
-# ─── Construcción del grafo ───────────────────────────────────────────────────
+# ─── Construcción del grafo con MemorySaver ───────────────────────────────────
+
+# MemorySaver persiste el estado entre llamadas del mismo thread_id en RAM.
+# Permite reanudar una auditoría pausada dentro de la misma sesión.
+_memory = MemorySaver()
+
 
 def construir_grafo():
     builder = StateGraph(AgentState)
@@ -371,11 +395,20 @@ def construir_grafo():
     )
     builder.add_edge("generar_reporte", END)
 
-    return builder.compile()
+    # Compilar con checkpointer para memoria persistente entre iteraciones
+    return builder.compile(checkpointer=_memory)
 
 
 def ejecutar_auditoria(objetivo: str, modelo: str = MODELO_DEFAULT) -> dict:
     grafo = construir_grafo()
+
+    # thread_id único por auditoría — permite reanudar si se llama de nuevo con el mismo id
+    import hashlib, time
+    thread_id = hashlib.md5(f"{objetivo}-{time.time()}".encode()).hexdigest()[:12]
+    config = {"configurable": {"thread_id": thread_id}}
+
+    print(f"[MEMORIA] Thread ID de auditoría: {thread_id}")
+
     estado_inicial = {
         "objetivo": objetivo,
         "modelo": modelo,
@@ -386,5 +419,5 @@ def ejecutar_auditoria(objetivo: str, modelo: str = MODELO_DEFAULT) -> dict:
         "messages": [],
         "pensamiento": "",
     }
-    resultado = grafo.invoke(estado_inicial)
+    resultado = grafo.invoke(estado_inicial, config=config)
     return resultado
